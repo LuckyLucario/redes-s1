@@ -4,207 +4,27 @@ from tcp import Servidor
 from camadafisica import PTY
 from ip import IP
 from slip import CamadaEnlace
-import re
-
-MAXIMUM_MESSAGE_SIZE = 510
-HASHTAG = 35
-ENDLINE = b'\r\n'
-apelidos = {}
-canais = {}
-
-def validar_nome(nome):
-    return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
-
-#region SAIR
-def sair(conexao):
-    if canais != {}:
-        desconectar_usuario_dos_canais(conexao)
-    if apelidos != {}:        
-        del apelidos[conexao.apelido.lower()]
-    print(conexao, 'conexão fechada')
-    conexao.fechar()
+#!/usr/bin/env python3
+# Antes de usar, execute o seguinte comando para evitar que o Linux feche
+# as conexões TCP que o seu programa estiver tratando:
+#
+# sudo iptables -I OUTPUT -p tcp --tcp-flags RST RST -j DROP
 
 
-def desconectar_usuario_dos_canais(conexao):
-    conexoesDest = []
-    for canal, users in canais.items():
-        if conexao in users:
-            for user in users:
-                if user != conexao and user not in conexoesDest:
-                    conexoesDest.append(user)
-            canais[canal.lower()].remove(conexao)
-            
-    enviar_mensagem_de_saida(conexao, conexoesDest)
+# Este é um exemplo de um programa que faz eco, ou seja, envia de volta para
+# o cliente tudo que for recebido em uma conexão.
 
-
-def enviar_mensagem_de_saida(conexao, conexoesDest):
-    for conexaoDest in conexoesDest:
-        conexaoDest.enviar(b':' + conexao.apelido + b' QUIT :Connection closed' + ENDLINE)
-#endregion        
-
-#region NICK
-def nick(conexao, dado):
-    apelido = extrair_apelido(dado)
-    if validar_nome(apelido):
-        alterar_apelido(conexao, apelido)
-    else:
-        conexao.enviar(b':server 432 ' + conexao.apelido + b' ' + apelido + b' :Erroneous nickname' + ENDLINE)
-
-
-def alterar_apelido(conexao, apelido):
-    if apelido.lower() in apelidos:
-        conexao.enviar(b':server 433 ' + conexao.apelido + b' ' + apelido + b' :Nickname is already in use' + ENDLINE)
-    else:
-        if conexao.apelido == b'*':
-            apelidos[apelido.lower()] = conexao
-            conexao.apelido = apelido
-            conexao.enviar(b':server 001 ' + apelido + b' :Welcome' + ENDLINE)
-            conexao.enviar(b':server 422 ' + apelido + b' :MOTD File is missing' + ENDLINE)
-        else:
-            del apelidos[conexao.apelido.lower()]
-            apelidos[apelido.lower()] = conexao
-            conexoesDest = []
-            gerar_conexoes_destino(conexao, conexoesDest)
-            for conexaoDest in conexoesDest:
-                conexaoDest.enviar(b':' + conexao.apelido + b' NICK ' + apelido + ENDLINE)
-            conexao.enviar(b':' + conexao.apelido + b' NICK ' + apelido + ENDLINE)
-            conexao.apelido = apelido
-
-def gerar_conexoes_destino(conexao, conexoesDest):
-    for users in canais.values():
-        if conexao in users:
-            for user in users:
-                if user != conexao and user not in conexoesDest:
-                    conexoesDest.append(user)
-
-
-def extrair_apelido(dado):
-    apelido = dado.split(b' ', 1)[1]
-    apelido = apelido[:-2]
-    return apelido
-#endregion
-
-#region PRIVATEMESSAGE
-def privmsg(conexao, dado):
-    destinatario, conteudo = extrair_destinatario_e_conteudo(dado)
-    enviar_mensagem(conexao, destinatario, conteudo)
-
-
-def enviar_mensagem(conexao, destinatario, conteudo):
-    if destinatario.lower() in apelidos:
-        conexaoDest = apelidos[destinatario.lower()]
-        conexaoDest.enviar(b':' + conexao.apelido + b' PRIVMSG ' + destinatario + b' :' + conteudo + ENDLINE)
-    elif destinatario[0] == HASHTAG:
-        if destinatario.lower() in canais:
-            for conexaoDest in canais[destinatario.lower()]:
-                if conexaoDest != conexao:
-                    conexaoDest.enviar(b':' + conexao.apelido + b' PRIVMSG ' + destinatario + b' :' +  conteudo + ENDLINE)
-
-
-def extrair_destinatario_e_conteudo(dado):
-    destinatario = dado.split(b' ', 2)[1]
-    conteudo = dado.split(b':', 1)[1]
-    conteudo = conteudo[:-2]
-    return destinatario,conteudo
-#endregion
-
-#region JOIN
-def join(conexao, dado):
-    canal = extrair_canal(dado)
-    sortedMembers = []
-    
-    if validar_canal(canal):
-        criar_conexoes_com_canal(conexao, canal, sortedMembers)
-        enviar_mensagem_de_novo_membro(conexao, canal, sortedMembers)
-        sortedMembers.sort()
-        enviar_lista_de_membros_do_canal(conexao, canal, sortedMembers)             
-    else:
-        conexao.enviar(b':server 403 ' + canal + b' :No such channel' + ENDLINE)
-
-
-def validar_canal(canal):
-    return canal[0] == HASHTAG and validar_nome(canal[1:])
-
-
-def enviar_lista_de_membros_do_canal(conexao, canal, sortedMembers):
-    members = b':server 353 '+ conexao.apelido + b' = ' + canal + b' :' + sortedMembers[0]   
-        
-    for member in sortedMembers:
-        if (len(members) + len(member)) <= MAXIMUM_MESSAGE_SIZE:
-            if member != sortedMembers[0]:
-                members += b' ' + apelidos[member.lower()].apelido
-        else:
-            conexao.enviar(members + ENDLINE)
-            members = b':server 353 '+ conexao.apelido + b' = ' + canal + b' :' + member    
-    conexao.enviar(members + ENDLINE)
-    conexao.enviar(b':server 366 ' + conexao.apelido + b' ' + canal + b' :End of /NAMES list.' + ENDLINE)
-
-
-def enviar_mensagem_de_novo_membro(conexao, canal, sortedMembers):
-    for conexaoDest in canais[canal.lower()]: 
-        conexaoDest.enviar(b':' + conexao.apelido + b' JOIN :' + canal + ENDLINE)
-        if conexaoDest.apelido != conexao.apelido:
-            sortedMembers.append(conexaoDest.apelido)
-
-
-def criar_conexoes_com_canal(conexao, canal, sortedMembers):
-    if canal.lower() not in canais:
-        canais[canal.lower()] = list()
-    canais[canal.lower()].append(conexao)
-    sortedMembers.append(conexao.apelido)
-#endregion
-
-def extrair_canal(dado):
-    canal = dado.split(b' ', 1)[1]
-    canal = canal.split(b':', 1)[0]
-    if canal.endswith(ENDLINE):
-        canal = canal[:-2]
-    else:
-        canal = canal[:-1]
-    return canal
-
-#region PART
-def part(conexao, dado):
-    canal = extrair_canal(dado)
-    desconectar_usuario(conexao, canal)
-
-
-def desconectar_usuario(conexao, canal):
-    if canal.lower() in canais:
-        enviar_mensagem_de_partida(conexao, canal)
-        canais[canal.lower()].remove(conexao)
-        
-
-def enviar_mensagem_de_partida(conexao, canal):
-    for conexaoDest in canais[canal.lower()]:
-            conexaoDest.enviar(b':' + conexao.apelido + b' PART ' + canal + ENDLINE)
-#endregion
+import asyncio
+from ip import IP
+from tcp import Servidor
 
 def dados_recebidos(conexao, dados):
     if dados == b'':
-        return sair(conexao)
-    dados = conexao.dados_residuais + dados
-    for dado in dados.splitlines(True):
-        if dado.endswith(ENDLINE):
-            conexao.dados_residuais = b''
-            if dado.startswith(b'PING'):
-                conexao.enviar(b':server PONG server :' + dado.split(b' ', 1)[1])
-            elif dado.startswith(b'NICK'):
-                nick(conexao, dado)
-            elif dado.startswith(b'PRIVMSG'):
-                privmsg(conexao, dado)
-            elif dado.startswith(b'JOIN'):
-                join(conexao, dado)
-            elif dado.startswith(b'PART'):
-                part(conexao, dado)
-        else:
-            conexao.dados_residuais = dado
-    print(conexao, dado)
+        conexao.fechar()
+    else:
+        conexao.enviar(dados)   # envia de volta
 
 def conexao_aceita(conexao):
-    conexao.dados_residuais = b''
-    conexao.apelido = b'*'
-    print(conexao, 'nova conexão')
     conexao.registrar_recebedor(dados_recebidos)
 
 linha_serial = PTY()
